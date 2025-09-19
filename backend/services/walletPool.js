@@ -105,7 +105,10 @@ class WalletPoolService {
   }
 
   assignWallet(touristId = 0, tripEnd) {
-    const availableWallet = this.walletPool.find(w => w.available)
+    // FIFO by stable index ordering
+    const availableWallet = this.walletPool
+      .filter(w => w.available)
+      .sort((a, b) => a.index - b.index)[0]
     if (!availableWallet) {
       throw new Error("No available wallets in pool")
     }
@@ -139,6 +142,13 @@ class WalletPoolService {
     return false
   }
 
+  // Release by index to match admin API semantics
+  releaseWalletByIndex(index) {
+    const wallet = this.walletPool.find(w => w.index === index)
+    if (!wallet) return false
+    return this.releaseWallet(wallet.address)
+  }
+
   getWalletInfo(address) {
     return this.walletPool.find(w => w.address === address)
   }
@@ -147,13 +157,26 @@ class WalletPoolService {
     const available = this.walletPool.filter(w => w.available).length
     const active = this.walletPool.length - available
     
+    // Detailed list for dashboards
+    const walletDetails = this.walletPool.map(w => ({
+      index: w.index,
+      address: w.address,
+      status: w.available ? 'available' : 'assigned',
+      assignedToTouristId: w.touristId || null,
+      assignedAt: w.assignedAt || null,
+      expiresAt: w.expiresAt || null,
+    }))
+
     return {
       total: this.walletPool.length,
       available,
       active,
       assigned: active,
       utilization: ((active / this.walletPool.length) * 100).toFixed(2) + '%',
-      initialized: this.initialized
+      initialized: this.initialized,
+      // For backward compatibility with existing frontend code
+      assignedWallets: walletDetails,
+      walletDetails
     }
   }
 
@@ -162,6 +185,7 @@ class WalletPoolService {
     const cutoffTime = new Date(Date.now() - (maxAgeHours * 60 * 60 * 1000))
     const now = new Date()
     let cleaned = 0
+    const freed = []
     
     this.walletPool.forEach(wallet => {
       if (!wallet.available) {
@@ -176,6 +200,7 @@ class WalletPoolService {
           wallet.touristId = null
           this.activeWallets.delete(wallet.address)
           cleaned++
+          freed.push({ index: wallet.index, address: wallet.address })
         }
       }
     })
@@ -184,7 +209,7 @@ class WalletPoolService {
       console.log(`Cleaned up ${cleaned} expired wallet assignments`)
     }
     
-    return cleaned
+    return { cleaned, freed }
   }
 
   // Check for expired assignments and clean them up (alias for cleanupExpiredWallets)

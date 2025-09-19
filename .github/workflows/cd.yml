@@ -1,0 +1,70 @@
+name: CD
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  # Set DEPLOY_TARGET to LOCAL, RENDER, or VERCEL at the repo/environment level as needed
+  DEPLOY_TARGET: ${{ vars.DEPLOY_TARGET }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: 'npm'
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build backend Docker image
+        run: |
+          docker build -t ghcr.io/${{ github.repository }}/backend:${{ github.sha }} -f Dockerfile .
+
+      - name: Push backend image to GHCR (for Render)
+        if: ${{ env.DEPLOY_TARGET != 'LOCAL' }}
+        run: |
+          docker push ghcr.io/${{ github.repository }}/backend:${{ github.sha }}
+
+      - name: Trigger Render deploy hook
+        if: ${{ env.DEPLOY_TARGET == 'RENDER' }}
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: |
+          if [ -n "$RENDER_DEPLOY_HOOK" ]; then curl -s -X POST "$RENDER_DEPLOY_HOOK"; else echo "No Render hook set"; fi
+
+      - name: Trigger Vercel deploy (frontend)
+        if: ${{ env.DEPLOY_TARGET == 'VERCEL' }}
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+        run: |
+          if [ -n "$VERCEL_TOKEN" ] && [ -n "$VERCEL_PROJECT_ID" ] && [ -n "$VERCEL_ORG_ID" ]; then \
+            npx vercel deploy --prod --token "$VERCEL_TOKEN" --yes || true; \
+          else \
+            echo "Vercel secrets not set; skipping"; \
+          fi
+
+      - name: Local deployment instructions
+        if: ${{ env.DEPLOY_TARGET == 'LOCAL' }}
+        run: |
+          echo "To run locally:"
+          echo "docker pull ghcr.io/${{ github.repository }}/backend:${{ github.sha }}"
+          echo "docker run -p 5000:5000 --env-file .env ghcr.io/${{ github.repository }}/backend:${{ github.sha }}"

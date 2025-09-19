@@ -24,7 +24,9 @@ const AdminWalletPool = () => {
       if (!response.ok) throw new Error('Failed to fetch wallet pool status')
       
       const data = await response.json()
-      setWallets(data.status.assignedWallets || [])
+      // Supports both new walletDetails and legacy assignedWallets
+      const detailList = data.status.walletDetails || data.status.assignedWallets || []
+      setWallets(detailList)
       setStatus({
         total: data.status.total || 0,
         available: data.status.available || 0,
@@ -91,7 +93,7 @@ const AdminWalletPool = () => {
     const matchesFilter = filter === 'all' || wallet.status === filter
     const matchesSearch = searchTerm === '' || 
       wallet.address.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      wallet.assignedToTouristId?.toString().includes(searchTerm)
+      (wallet.assignedToTouristId ? wallet.assignedToTouristId.toString().includes(searchTerm) : false)
     return matchesFilter && matchesSearch
   })
 

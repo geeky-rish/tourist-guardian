@@ -4,6 +4,13 @@ A full-stack system for tourist safety monitoring, SOS handling, and on-chain id
 
 Stack: React + Node/Express + MongoDB + Solidity (Truffle/Ganache) + Leaflet with an IoT simulation for live movement.
 
+## CI/CD Status
+
+![CI](https://github.com/geeky-rish/tourist-guardian/actions/workflows/ci.yml/badge.svg)
+![CD](https://github.com/geeky-rish/tourist-guardian/actions/workflows/cd.yml/badge.svg)
+
+> Replace OWNER/REPO placeholders with your GitHub org/user and repo name if badges don’t auto-resolve on GitHub.
+
 ## Overview
 - Blockchain identity: Every tourist gets a tamper-proof on-chain ID
 - Live map: Real-time location tracking via IoT simulation
@@ -90,6 +97,22 @@ cd frontend
 npm run dev
 ```
 Open http://localhost:3000
+
+## CI/CD
+- CI (on every push/PR): installs deps, lints, runs tests if present, builds backend Docker image, uploads image digest artifact.
+- CD (on main): builds and pushes backend image to GHCR and triggers Render/Vercel deploys if configured.
+
+Secrets to configure in GitHub:
+- `MONGODB_URI`
+- `ADMIN_PRIVATE_KEY` / other blockchain keys
+- `RENDER_DEPLOY_HOOK`
+- `VERCEL_TOKEN`, `VERCEL_PROJECT_ID`, `VERCEL_ORG_ID`
+
+Local deploy using CI-built image:
+```
+docker pull ghcr.io/<owner>/<repo>/backend:<sha>
+docker run -p 5000:5000 --env-file backend/.env ghcr.io/<owner>/<repo>/backend:<sha>
+```
 
 ## Configuration
 ### Backend .env (see .env.example)

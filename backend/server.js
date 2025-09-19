@@ -230,6 +230,51 @@ async function initServices() {
     await walletPool.initialize()
     console.log("Wallet pool service initialized")
 
+    // Sync wallet pool with MongoDB (persist if empty, restore assignments if present)
+    try {
+      if (isMongoConnected()) {
+        const existingPool = await WalletPool.find({}).lean()
+        if (existingPool.length === 0) {
+          // Seed DB with current in-memory pool as available
+          const docs = walletPool.walletPool.map(w => ({
+            index: w.index,
+            address: w.address,
+            status: 'available',
+            assignedToTouristId: null,
+            assignedAt: null,
+            expiresAt: null,
+          }))
+          if (docs.length > 0) {
+            await WalletPool.insertMany(docs)
+            console.log(`Seeded WalletPool collection with ${docs.length} wallets`)
+          }
+        } else {
+          // Apply DB status to in-memory pool
+          const byIndex = new Map(existingPool.map(d => [d.index, d]))
+          walletPool.walletPool.forEach(w => {
+            const doc = byIndex.get(w.index)
+            if (doc) {
+              const isAssigned = doc.status === 'assigned'
+              w.available = !isAssigned
+              w.assignedAt = doc.assignedAt || null
+              w.expiresAt = doc.expiresAt || null
+              w.touristId = doc.assignedToTouristId || null
+              if (isAssigned) {
+                walletPool.activeWallets.set(w.address, w)
+              } else {
+                walletPool.activeWallets.delete(w.address)
+              }
+            }
+          })
+          console.log(`Synchronized wallet pool from MongoDB (${existingPool.length} records)`)
+        }
+      } else {
+        console.log('⚠️  Skipping wallet pool DB sync (MongoDB not available)')
+      }
+    } catch (e) {
+      console.log('Wallet pool DB sync warning:', e.message)
+    }
+
     // Initialize TX queue service
     txQueue = new TXQueueService()
     await txQueue.initialize(blockchainService)
@@ -384,7 +429,26 @@ app.post("/api/tourists/register", auditRegistration, async (req, res) => {
 
     // Check for expired assignments and release wallets
     walletQueue.checkExpiredAssignments()
-    walletPool.checkExpiredAssignments()
+    const cleanup = walletPool.checkExpiredAssignments()
+    // Reflect cleanup in DB
+    try {
+      if (cleanup && cleanup.freed && cleanup.freed.length > 0 && isMongoConnected()) {
+        await Promise.all(cleanup.freed.map(async (f) => {
+          await WalletPool.findOneAndUpdate(
+            { index: f.index },
+            {
+              status: 'available',
+              assignedToTouristId: null,
+              assignedAt: null,
+              expiresAt: null,
+              updatedAt: new Date()
+            }
+          )
+        }))
+      }
+    } catch (e) {
+      console.log('Wallet cleanup DB sync warning:', e.message)
+    }
 
     // Get next available wallet from pool
     const assignedWallet = walletPool.assignWallet(0, tripEnd) // We'll update the touristId after creation
@@ -903,7 +967,7 @@ app.post("/api/admin/wallet-pool/:index/release", authenticateJWT, authorizeRole
     }
 
     // Release wallet
-    const result = walletPool.releaseWallet(walletIndex)
+    const result = walletPool.releaseWalletByIndex(walletIndex)
     
     // Update DB
     await WalletPool.findOneAndUpdate(
@@ -921,6 +985,56 @@ app.post("/api/admin/wallet-pool/:index/release", authenticateJWT, authorizeRole
   } catch (error) {
     console.error("Wallet release error:", error)
     res.status(500).json({ error: "Failed to release wallet: " + error.message })
+  }
+})
+
+// Release tourist (end trip) -> free wallet and mark tourist inactive
+app.post("/api/tourists/:id/release", authenticateJWT, authorizeRole(['admin', 'tourismDept']), auditWalletRelease, async (req, res) => {
+  try {
+    const id = Number(req.params.id)
+    const tourist = await Tourist.findOne({ blockchainId: id, isActive: true })
+    if (!tourist) return res.status(404).json({ error: "Tourist not found or already released" })
+
+    // Check pending TXs before release
+    const walletIndex = tourist.assignedWallet?.index
+    if (walletIndex === undefined || walletIndex === null) {
+      return res.status(400).json({ error: "Tourist has no assigned wallet" })
+    }
+    if (txQueue && !txQueue.canReleaseWallet(walletIndex)) {
+      return res.status(400).json({ 
+        error: "Cannot release wallet - has pending transactions",
+        pendingJobs: txQueue.getJobsForWallet(walletIndex).filter(j => j.status === 'pending').length
+      })
+    }
+
+    // Release in-memory queue/pool
+    walletPool.releaseWalletByIndex(walletIndex)
+
+    // Update wallet in DB
+    await WalletPool.findOneAndUpdate(
+      { index: walletIndex },
+      {
+        status: 'available',
+        assignedToTouristId: null,
+        assignedAt: null,
+        expiresAt: null,
+        updatedAt: new Date()
+      }
+    )
+
+    // Mark tourist inactive
+    tourist.isActive = false
+    await tourist.save()
+
+    // Enqueue tour_end TX for audit trail (best-effort)
+    if (txQueue) {
+      txQueue.enqueueJob(id, walletIndex, 'tour_end', { releasedAt: new Date().toISOString() })
+    }
+
+    res.json({ success: true, message: "Tourist released and wallet freed" })
+  } catch (error) {
+    console.error("Tourist release error:", error)
+    res.status(500).json({ error: "Failed to release tourist: " + error.message })
   }
 })
 
